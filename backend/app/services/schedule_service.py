@@ -26,6 +26,7 @@ from app.schemas.schedule import (
     DailyTaskUpdate,
     DayOverview,
     DayOverviewRange,
+    TaskAgentChatResponse,
     TaskMemoryCreate,
     TaskMemoryRead,
     TaskMemoryUpdate,
@@ -711,6 +712,209 @@ class ScheduleService:
             await sync_plan_items_from_workflow_run(self.db, wf_run.id)
         await self.update_task(task_id, DailyTaskUpdate(status="in_progress"))
         return await orch.get_run(run.id)
+
+    async def agent_chat(
+        self,
+        task_id: str,
+        *,
+        agent_id: str,
+        message: str,
+        run_id: str | None = None,
+        new_session: bool = False,
+    ) -> TaskAgentChatResponse:
+        """Direct Agent conversation for a DailyTask.
+
+        First turn of a session attaches existing markdown docs; follow-ups do not
+        (process inject when possible, otherwise continue with chat history only).
+        """
+        from app.domain.enums import RunStatus
+        from app.models.run import AgentRunModel
+        from app.services.run_service import RunService
+
+        message = (message or "").strip()
+        if not message:
+            raise ValidationError("message 不能为空")
+
+        task = await self.get_task(task_id)
+        agent = await self.db.get(AgentModel, agent_id)
+        if not agent:
+            raise NotFoundError("Agent", agent_id)
+
+        run_svc = RunService(self.db)
+        _TERMINAL = {
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+        }
+
+        # 1) Prefer inject into an active run for this task+agent.
+        running: AgentRunModel | None = None
+        if run_id:
+            candidate = await self.db.get(AgentRunModel, run_id)
+            if (
+                candidate
+                and candidate.daily_task_id == task_id
+                and candidate.agent_id == agent_id
+                and candidate.status not in _TERMINAL
+            ):
+                running = candidate
+        if running is None and not new_session:
+            running = (
+                await self.db.execute(
+                    select(AgentRunModel)
+                    .where(
+                        AgentRunModel.daily_task_id == task_id,
+                        AgentRunModel.agent_id == agent_id,
+                        AgentRunModel.status.notin_(list(_TERMINAL)),
+                    )
+                    .order_by(AgentRunModel.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+
+        if running is not None:
+            if running.status == RunStatus.PENDING:
+                raise ConflictError("AGENT_BUSY", "Agent 正在启动，请稍后再发")
+            can_inject = await self._provider_supports_stdin_inject(self.db, agent)
+            if can_inject and running.status == RunStatus.RUNNING:
+                try:
+                    await run_svc.inject_message(running.id, message)
+                    if task.status == "todo":
+                        await self.update_task(task_id, DailyTaskUpdate(status="in_progress"))
+                    return TaskAgentChatResponse(
+                        run_id=running.id,
+                        agent_id=agent_id,
+                        status=running.status,
+                        created=False,
+                        mode="inject",
+                        docs_attached=False,
+                    )
+                except ConflictError:
+                    # Process already gone — fall through to continue/start.
+                    pass
+            elif running.status == RunStatus.RUNNING and not can_inject:
+                raise ConflictError(
+                    "AGENT_BUSY",
+                    "当前轮次进行中；结束后再发送将自动延续上下文（不再附带文档）",
+                )
+
+        workspace = (agent.workspace_path or "").strip() or "workspace/demo"
+        prior_ids = await self._prior_task_agent_run_ids(task_id, agent_id)
+        attach_docs = new_session or not prior_ids
+
+        if attach_docs:
+            prompt = self._build_start_prompt(task, message, workspace_path=workspace)
+            mode = "start"
+        else:
+            history = await self._load_task_agent_history(prior_ids)
+            if history:
+                prompt = (
+                    f"{message}\n\n"
+                    f"--- 同 Agent 历史对话（延续上下文，文档已在首轮提供） ---\n"
+                    f"{_truncate(history, 12000)}"
+                )
+            else:
+                prompt = message
+            mode = "continue"
+
+        row = await run_svc.create_and_start(
+            agent_id,
+            prompt,
+            daily_task_id=task_id,
+            workspace_path=workspace,
+            display_message=message,
+        )
+        if task.status == "todo":
+            await self.update_task(task_id, DailyTaskUpdate(status="in_progress"))
+        return TaskAgentChatResponse(
+            run_id=row.id,
+            agent_id=agent_id,
+            status=row.status,
+            created=True,
+            mode=mode,
+            docs_attached=attach_docs,
+        )
+
+    async def _prior_task_agent_run_ids(self, task_id: str, agent_id: str) -> list[str]:
+        from app.models.run import AgentRunModel
+
+        rows = (
+            await self.db.execute(
+                select(AgentRunModel.id)
+                .where(
+                    AgentRunModel.daily_task_id == task_id,
+                    AgentRunModel.agent_id == agent_id,
+                )
+                .order_by(AgentRunModel.created_at.asc())
+            )
+        ).scalars().all()
+        return list(rows)
+
+    async def _load_task_agent_history(self, agent_run_ids: list[str]) -> str:
+        from app.models.run import AgentMessageModel
+
+        if not agent_run_ids:
+            return ""
+        # Keep last few runs to bound prompt size.
+        recent = agent_run_ids[-6:]
+        blocks: list[str] = []
+        for rid in recent:
+            msgs = (
+                await self.db.execute(
+                    select(AgentMessageModel)
+                    .where(
+                        AgentMessageModel.run_id == rid,
+                        AgentMessageModel.role.in_(("user", "assistant")),
+                    )
+                    .order_by(AgentMessageModel.created_at.asc())
+                )
+            ).scalars().all()
+            if not msgs:
+                continue
+            lines = [f"## 会话 {rid}"]
+            for m in msgs:
+                content = (m.content or "").strip()
+                if not content:
+                    continue
+                if m.role == "user" and (
+                    "任务已有 Markdown" in content or "同 Agent 历史对话" in content
+                ):
+                    # Prefer the short display portion already stored; otherwise truncate.
+                    content = _truncate(content.split("\n\n---", 1)[0].strip() or content, 600)
+                lines.append(f"[{m.role}]\n{_truncate(content, 1200)}")
+            blocks.append("\n".join(lines))
+        return "\n\n".join(blocks)
+
+    async def get_latest_agent_chat_run(
+        self, task_id: str, agent_id: str | None = None
+    ):
+        from app.models.run import AgentRunModel
+        from app.services.run_service import RunService
+
+        await self._require_task(task_id)
+        q = select(AgentRunModel).where(AgentRunModel.daily_task_id == task_id)
+        if agent_id:
+            q = q.where(AgentRunModel.agent_id == agent_id)
+        row = (
+            await self.db.execute(q.order_by(AgentRunModel.created_at.desc()).limit(1))
+        ).scalar_one_or_none()
+        if not row:
+            return None
+        return await RunService(self.db).get_run(row.id)
+
+    @staticmethod
+    async def _provider_supports_stdin_inject(db: AsyncSession, agent: AgentModel) -> bool:
+        """Codex CLI (uses_stdin=False) cannot receive mid-run follow-ups via stdin."""
+        from app.models.provider import ProviderModel
+        from app.providers.registry import registry
+
+        provider = await db.get(ProviderModel, agent.provider_id)
+        if not provider:
+            return True
+        impl = registry.get(provider.kind)
+        if impl is None:
+            return True
+        return bool(getattr(impl, "uses_stdin", True))
 
     async def _workspace_for_workflow(self, workflow_id: str) -> str:
         """Prefer the first step agent's workspace so markdown paths resolve correctly."""

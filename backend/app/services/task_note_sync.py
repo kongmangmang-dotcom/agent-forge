@@ -56,6 +56,8 @@ def _read_markdown_body(workspace: str, path: str) -> str:
 
 
 async def resolve_daily_task_id(session: AsyncSession, agent_run: AgentRunModel) -> str | None:
+    if agent_run.daily_task_id:
+        return agent_run.daily_task_id
     if not agent_run.step_run_id:
         return None
     step = await session.get(StepRunModel, agent_run.step_run_id)

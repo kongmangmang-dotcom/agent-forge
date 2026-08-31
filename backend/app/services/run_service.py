@@ -62,7 +62,9 @@ class RunService:
         task_prompt: str,
         *,
         step_run_id: str | None = None,
+        daily_task_id: str | None = None,
         workspace_path: str | None = None,
+        display_message: str | None = None,
     ) -> AgentRunModel:
         agent, provider = await self._load_agent(agent_id)
         provider_impl = registry.get(provider.kind)
@@ -74,6 +76,7 @@ class RunService:
         row = AgentRunModel(
             id=run_id,
             step_run_id=step_run_id,
+            daily_task_id=daily_task_id,
             agent_id=agent_id,
             status=RunStatus.PENDING,
             task_prompt=task_prompt,
@@ -82,13 +85,13 @@ class RunService:
         self.db.add(row)
         await self.db.flush()
 
-        # user message
+        # user message (prefer short display text when prompt includes injected docs)
         self.db.add(
             AgentMessageModel(
                 id=new_id("msg"),
                 run_id=run_id,
                 role="user",
-                content=task_prompt,
+                content=(display_message or task_prompt).strip() or task_prompt,
             )
         )
         await self.db.flush()

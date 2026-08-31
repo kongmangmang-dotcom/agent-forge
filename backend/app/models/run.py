@@ -12,6 +12,9 @@ class AgentRunModel(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     step_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    daily_task_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("daily_task.id", ondelete="SET NULL"), nullable=True
+    )
     agent_id: Mapped[str] = mapped_column(String, ForeignKey("agent.id"), nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
     task_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")

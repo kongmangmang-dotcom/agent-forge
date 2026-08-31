@@ -178,5 +178,21 @@ class StartTaskWorkflowRequest(BaseModel):
     workflow_definition_id: str | None = None
 
 
+class TaskAgentChatRequest(BaseModel):
+    agent_id: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+    run_id: str | None = None
+    new_session: bool = False
+
+
+class TaskAgentChatResponse(BaseModel):
+    run_id: str
+    agent_id: str
+    status: str
+    created: bool
+    mode: str  # start | inject | continue
+    docs_attached: bool = False
+
+
 class PlanTodayResponse(BaseModel):
     task: DailyTaskRead

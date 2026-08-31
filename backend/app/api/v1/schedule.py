@@ -1,10 +1,15 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends, Query, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
 from app.api.deps import get_session
+from app.api.v1.runs import _run_read
+from app.models.agent import AgentModel
 from app.schemas.common import ListResponse
+from app.schemas.run import RunRead
 from app.schemas.schedule import (
     DailyTaskCreate,
     DailyTaskRead,
@@ -16,6 +21,8 @@ from app.schemas.schedule import (
     PlanTodayResponse,
     RegeneratePlanRequest,
     StartTaskWorkflowRequest,
+    TaskAgentChatRequest,
+    TaskAgentChatResponse,
     TaskMemoryCreate,
     TaskMemoryRead,
     TaskMemoryUpdate,
@@ -114,6 +121,39 @@ async def start_task_workflow(
         task_prompt=body.task_prompt if body else None,
         workflow_definition_id=body.workflow_definition_id if body else None,
     )
+
+
+@router.post("/tasks/{task_id}/agent-chat", response_model=TaskAgentChatResponse)
+async def task_agent_chat(
+    task_id: str,
+    body: TaskAgentChatRequest,
+    db: AsyncSession = Depends(get_session),
+):
+    return await ScheduleService(db).agent_chat(
+        task_id,
+        agent_id=body.agent_id,
+        message=body.message,
+        run_id=body.run_id,
+        new_session=body.new_session,
+    )
+
+
+@router.get("/tasks/{task_id}/agent-chat/latest", response_model=RunRead | None)
+async def latest_task_agent_chat(
+    task_id: str,
+    agent_id: str | None = Query(None),
+    db: AsyncSession = Depends(get_session),
+):
+    row = await ScheduleService(db).get_latest_agent_chat_run(task_id, agent_id=agent_id)
+    if not row:
+        return None
+    result = await db.execute(
+        select(AgentModel)
+        .options(joinedload(AgentModel.provider))
+        .where(AgentModel.id == row.agent_id)
+    )
+    agent = result.scalar_one_or_none()
+    return _run_read(row, agent)
 
 
 @router.post("/tasks/{task_id}/notes", response_model=TaskNoteRead, status_code=201)
