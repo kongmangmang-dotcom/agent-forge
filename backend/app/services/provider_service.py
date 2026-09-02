@@ -1,7 +1,8 @@
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError
 from app.core.ids import new_id
 from app.models.provider import ProviderModel
 from app.schemas.provider import ProviderCreate, ProviderRead, ProviderUpdate
@@ -58,27 +59,36 @@ class ProviderService:
         if not row:
             raise NotFoundError("Provider", provider_id)
         updates = data.model_dump(exclude_unset=True)
-        if "config" in updates:
-            row.config_encrypted = updates.pop("config")
+        if "config" in updates and updates["config"] is not None:
+            # Shallow-merge so partial edits keep cli_command etc.
+            row.config_encrypted = {**(row.config_encrypted or {}), **updates.pop("config")}
         if "type" in updates and updates["type"] is not None:
             row.type = updates["type"].value
             del updates["type"]
         for key, value in updates.items():
             setattr(row, key, value)
         await self.db.flush()
+        await self.db.refresh(row)
         return _to_read(row)
 
     async def delete_provider(self, provider_id: str) -> None:
         row = await self.db.get(ProviderModel, provider_id)
         if not row:
             raise NotFoundError("Provider", provider_id)
+        name = row.name
         await self.db.delete(row)
+        try:
+            await self.db.flush()
+        except IntegrityError as exc:
+            raise ConflictError(
+                "PROVIDER_IN_USE",
+                f"无法删除 Provider「{name}」：仍被 Agent 引用",
+            ) from exc
 
     async def test_connection(self, provider_id: str) -> tuple[bool, str, int | None]:
         row = await self.db.get(ProviderModel, provider_id)
         if not row:
             raise NotFoundError("Provider", provider_id)
-        # Week 2: real provider adapter test; Week 1 returns config check only
         if row.kind in ("openai", "anthropic", "gemini"):
             key_ref = (row.config_encrypted or {}).get("api_key_ref", "")
             if key_ref.startswith("env:"):

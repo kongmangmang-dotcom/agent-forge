@@ -252,7 +252,12 @@ async def seed() -> None:
             name=WORKFLOW["name"],
             title=WORKFLOW["title"],
             description=WORKFLOW["description"],
-            options={"is_default_dev_plan": True, "plan_only": True, "reuse_same_agent_session": True},
+            options={
+                "is_default_dev_plan": True,
+                "plan_only": True,
+                "reuse_same_agent_session": True,
+                "tags": ["计划"],
+            },
         )
         session.add(wf)
         await session.flush()

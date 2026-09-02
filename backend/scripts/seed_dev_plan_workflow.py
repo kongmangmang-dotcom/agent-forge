@@ -17,9 +17,9 @@ WF_DESC = "仅生成开发计划：澄清目标 → 拆分任务 → 产出计�
 
 # planning-only steps
 STEP_DEFS = [
-    ("clarify", "目标澄清", [], False, "openai-planner"),
-    ("breakdown", "任务拆分", ["clarify"], False, "openai-planner"),
-    ("plan_output", "计划产出", ["breakdown"], False, "claude-researcher"),
+    ("clarify", "目标澄清", [], False, "openai-planner", "planner"),
+    ("breakdown", "任务拆分", ["clarify"], False, "openai-planner", "planner"),
+    ("plan_output", "计划产出", ["breakdown"], False, "claude-researcher", "researcher"),
 ]
 
 
@@ -47,6 +47,7 @@ async def main() -> None:
                 "is_default_dev_plan": True,
                 "plan_only": True,
                 "reuse_same_agent_session": True,
+                "tags": ["计划"],
             }
             row.steps.clear()
             await session.flush()
@@ -65,19 +66,21 @@ async def main() -> None:
                     "is_default_dev_plan": True,
                     "plan_only": True,
                     "reuse_same_agent_session": True,
+                    "tags": ["计划"],
                 },
             )
             session.add(row)
             await session.flush()
             print(f"creating {WF_NAME} {wf_id}")
 
-        for i, (key, label, deps, parallel, agent_name) in enumerate(STEP_DEFS):
+        for i, (key, label, deps, parallel, agent_name, role) in enumerate(STEP_DEFS):
             session.add(
                 WorkflowStepDefModel(
                     id=new_id("wfs"),
                     workflow_id=wf_id,
                     step_key=key,
                     label=label,
+                    role=role,
                     agent_id=agent_id(agent_name),
                     depends_on=deps,
                     parallel=parallel,

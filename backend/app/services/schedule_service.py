@@ -48,6 +48,14 @@ _NOTE_BODY_MAX = 16_000
 _NOTE_SECTION_MAX = 40_000
 _MEMORY_ITEM_MAX = 800
 _MEMORY_SECTION_MAX = 4_000
+_SAFE_NAME = re.compile(r"[^a-zA-Z0-9\-]+")
+
+
+def _safe_doc_filename(title: str, note_id: str, index: int) -> str:
+    base = _SAFE_NAME.sub("_", (title or "").strip()).strip("._") or f"note-{index}"
+    base = base[:40].strip("_") or f"note-{index}"
+    short_id = (note_id or "")[-6:] or str(index)
+    return f"{index:02d}_{base}_{short_id}.md"
 
 
 def _derive_title(requirement: str, fallback: str = "") -> str:
@@ -947,6 +955,44 @@ class ScheduleService:
                 return _truncate(loaded, _NOTE_BODY_MAX)
         return ""
 
+    def _materialize_task_docs(
+        self,
+        task: DailyTaskRead,
+        workspace_path: str,
+    ) -> list[tuple[str, str]]:
+        """把任务 Markdown 笔记写入工作区真实文件，返回 [(相对路径, 标题), ...]。"""
+        from pathlib import Path
+
+        from app.services.task_note_sync import _is_markdown_path
+
+        root = Path(workspace_path or ".")
+        docs_dir = root / ".agentforge" / "task-docs" / task.id
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        written: list[tuple[str, str]] = []
+        for i, n in enumerate(task.notes or [], start=1):
+            title = (n.title or "").strip() or f"笔记{i}"
+            path = (n.file_path or "").strip()
+            is_md = (
+                n.kind == "markdown"
+                or (path and _is_markdown_path(path))
+                or bool((n.body or "").strip())
+            )
+            content = self._markdown_note_body(n, workspace_path) if is_md else ""
+            if not content:
+                continue
+            fname = _safe_doc_filename(title, n.id, i)
+            out = docs_dir / fname
+            header = f"# {title}\n\n"
+            if path:
+                header += f"> 来源路径: `{path}`\n\n"
+            out.write_text(header + content, encoding="utf-8")
+            try:
+                rel = out.relative_to(root).as_posix()
+            except ValueError:
+                rel = str(out)
+            written.append((rel, title))
+        return written
+
     def _build_start_prompt(
         self,
         task: DailyTaskRead,
@@ -970,10 +1016,10 @@ class ScheduleService:
                 + _truncate("\n".join(mem_lines), _MEMORY_SECTION_MAX)
             )
 
-        # Default: attach existing markdown docs so the next run continues with prior artifacts.
+        # 文档写入工作区文件，prompt 只引用路径（避免 CLI argv/上下文膨胀）
         from app.services.task_note_sync import _is_markdown_path
 
-        md_blocks: list[str] = []
+        doc_files = self._materialize_task_docs(task, workspace_path)
         other_note_lines: list[str] = []
         for n in task.notes:
             title = (n.title or "").strip() or "(无标题)"
@@ -985,21 +1031,20 @@ class ScheduleService:
             )
             content = self._markdown_note_body(n, workspace_path) if is_md else ""
             if content:
-                header = f"### {title}"
-                if path:
-                    header += f"\n路径: {path}"
-                md_blocks.append(f"{header}\n\n{content}")
-            elif path:
+                continue  # 已物化为工作区文件
+            if path:
                 other_note_lines.append(f"- [文件] {title}: {path}")
             elif (n.body or "").strip():
                 other_note_lines.append(
                     f"- [笔记] {title}:\n{_truncate(n.body.strip(), _NOTE_BODY_MAX)}"
                 )
 
-        if md_blocks:
+        if doc_files:
+            lines = [f"- `{rel}` — {title}" for rel, title in doc_files]
             parts.append(
-                "--- 任务已有 Markdown 文档（请结合这些文档继续工作） ---\n"
-                + _truncate("\n\n-----\n\n".join(md_blocks), _NOTE_SECTION_MAX)
+                "--- 任务文档（已写入工作区，请直接打开这些文件阅读/修改） ---\n"
+                + "\n".join(lines)
+                + "\n\n请基于上述文件完成本步骤；需要改文档时直接编辑对应 md 并保存。"
             )
         if other_note_lines:
             parts.append("--- 其它任务笔记/文件 ---\n" + "\n".join(other_note_lines))

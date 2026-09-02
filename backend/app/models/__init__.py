@@ -1,5 +1,11 @@
 from app.models.agent import AgentModel
+from app.models.knowledge import (
+    KnowledgeBaseModel,
+    KnowledgeDocumentModel,
+    KnowledgeSegmentModel,
+)
 from app.models.provider import ProviderModel
+from app.models.role import AgentRoleModel
 from app.models.run import AgentEventModel, AgentMessageModel, AgentRunModel, FileChangeModel
 from app.models.schedule import (
     DailyTaskModel,
@@ -18,9 +24,13 @@ __all__ = [
     "AgentModel",
     "AgentEventModel",
     "AgentMessageModel",
+    "AgentRoleModel",
     "AgentRunModel",
     "DailyTaskModel",
     "FileChangeModel",
+    "KnowledgeBaseModel",
+    "KnowledgeDocumentModel",
+    "KnowledgeSegmentModel",
     "ProviderModel",
     "StepRunModel",
     "TaskMemoryModel",

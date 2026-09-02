@@ -35,6 +35,7 @@ class WorkflowStepDefModel(Base):
     )
     step_key: Mapped[str] = mapped_column(String, nullable=False)
     label: Mapped[str] = mapped_column(String, nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False, default="")
     agent_id: Mapped[str] = mapped_column(String, ForeignKey("agent.id"), nullable=False)
     depends_on: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     parallel: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

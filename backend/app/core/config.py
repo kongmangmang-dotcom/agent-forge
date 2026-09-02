@@ -10,6 +10,16 @@ class Settings(BaseSettings):
     api_port: int = 8000
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
 
+    # Knowledge RAG: OpenAI-compatible embeddings (optional; falls back to local_hash)
+    embedding_api_url: str = ""
+    embedding_api_key: str = ""
+    embedding_model: str = "text-embedding-3-small"
+
+    # Knowledge Q&A chat (optional; falls back to extractive answer from retrieved chunks)
+    chat_api_url: str = ""
+    chat_api_key: str = ""
+    chat_model: str = "gpt-4o-mini"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

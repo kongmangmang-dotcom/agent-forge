@@ -10,6 +10,7 @@ class WorkflowStepDefCreate(BaseModel):
     step_key: str
     label: str
     agent_id: str
+    role: str = ""
     depends_on: list[str] = Field(default_factory=list)
     parallel: bool = False
     sort_order: int = 0
@@ -19,6 +20,7 @@ class WorkflowDefinitionCreate(BaseModel):
     name: str
     title: str
     description: str = ""
+    tags: list[str] = Field(default_factory=list)
     options: dict[str, Any] = Field(default_factory=dict)
     steps: list[WorkflowStepDefCreate] = Field(default_factory=list)
 
@@ -27,6 +29,7 @@ class WorkflowDefinitionUpdate(BaseModel):
     name: str | None = None
     title: str | None = None
     description: str | None = None
+    tags: list[str] | None = None
     options: dict[str, Any] | None = None
     steps: list[WorkflowStepDefCreate] | None = None
 
@@ -37,6 +40,7 @@ class WorkflowStepDefRead(ORMModel):
     label: str
     agent_id: str
     agent_name: str | None = None
+    role: str = ""
     depends_on: list[str]
     parallel: bool
     sort_order: int
@@ -47,6 +51,7 @@ class WorkflowDefinitionRead(ORMModel):
     name: str
     title: str
     description: str
+    tags: list[str] = Field(default_factory=list)
     options: dict[str, Any]
     created_at: datetime
     steps: list[WorkflowStepDefRead] = Field(default_factory=list)
@@ -57,6 +62,7 @@ class WorkflowDefinitionSummary(ORMModel):
     name: str
     title: str
     description: str
+    tags: list[str] = Field(default_factory=list)
     step_count: int = 0
     created_at: datetime
 
@@ -73,6 +79,7 @@ class WorkflowStepRunRead(ORMModel):
     agent_id: str
     agent_name: str | None = None
     provider_name: str | None = None
+    role: str = ""
     depends_on: list[str] = Field(default_factory=list)
     parallel: bool = False
     status: str

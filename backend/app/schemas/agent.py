@@ -23,7 +23,7 @@ class AgentCreate(BaseModel):
     name: str
     provider_id: str
     model: str = ""
-    role: str
+    role: str = ""
     system_prompt: str = ""
     workspace_path: str = ""
     permissions: AgentPermissions = Field(default_factory=AgentPermissions)

@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.api.v1 import agents, events, providers, runs, schedule, workflows
+from app.api.v1 import agents, events, knowledge, providers, roles, runs, schedule, workflows
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.session import SessionLocal, engine
@@ -45,9 +45,11 @@ async def app_error_handler(_request: Request, exc: AppError):
 API = "/api/v1"
 app.include_router(providers.router, prefix=API)
 app.include_router(agents.router, prefix=API)
+app.include_router(roles.router, prefix=API)
 app.include_router(workflows.router, prefix=API)
 app.include_router(runs.router, prefix=API)
 app.include_router(schedule.router, prefix=API)
+app.include_router(knowledge.router, prefix=API)
 app.include_router(events.router, prefix=API)
 
 

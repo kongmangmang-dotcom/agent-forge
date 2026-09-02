@@ -69,12 +69,41 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[: max_chars - 20].rstrip() + "\n…(已截断)"
 
 
+_ROLE_HINTS = {
+    "planner": "理解需求、拆分任务、建立依赖、制定验收标准",
+    "researcher": "阅读项目结构、分析代码、查找风险",
+    "developer": "编写代码、修改文件、修复问题",
+    "tester": "编写测试、执行测试、分析失败原因",
+    "reviewer": "检查功能完整性、代码质量、安全问题",
+    "integrator": "合并代码、解决冲突、最终验证",
+}
+
+
+async def _role_hint(session: AsyncSession, role: str) -> tuple[str, str]:
+    """Return (display_name, description) for a role code."""
+    key = (role or "").strip()
+    if not key:
+        return "", ""
+    try:
+        from app.services.role_service import RoleService
+
+        found = await RoleService(session).get_by_code(key)
+        if found:
+            return found.name, found.description or found.system_prompt[:200]
+    except Exception:
+        logger.exception("load role hint failed for %s", key)
+    return key, _ROLE_HINTS.get(key, "")
+
+
 def _build_step_prompt(
     global_task: str,
     step_label: str,
     step_key: str,
     upstream: list[tuple[str, str, str]],
     *,
+    role: str = "",
+    role_name: str = "",
+    role_desc: str = "",
     conversation_history: str = "",
 ) -> str:
     """upstream: list of (step_key, label, summary)."""
@@ -104,9 +133,19 @@ def _build_step_prompt(
         if conversation_history.strip()
         else "请结合上游摘要完成本步骤职责，输出简要结果。"
     )
+    role_line = ""
+    role_key = (role or "").strip()
+    if role_key:
+        display = role_name or role_key
+        hint = role_desc or _ROLE_HINTS.get(role_key, "")
+        role_line = f"本步角色: {display} ({role_key})"
+        if hint:
+            role_line += f"\n角色说明: {hint}"
+        role_line += "\n"
     parts.append(
         f"\n--- 当前工作流步骤 ---\n"
         f"步骤: {step_label} ({step_key})\n"
+        f"{role_line}"
         f"{continue_hint}"
     )
     return "\n".join(parts)
@@ -468,6 +507,8 @@ class OrchestratorService:
                     agent_id=sr.agent_id,
                     agent_name=agent.name if agent else None,
                     provider_name=agent.provider.name if agent and agent.provider else None,
+                    role=(getattr(step_def, "role", None) or "").strip()
+                    or ((agent.role or "").strip() if agent else ""),
                     depends_on=list(step_def.depends_on or []),
                     parallel=step_def.parallel,
                     status=sr.status,
@@ -713,11 +754,20 @@ async def _run_step_isolated(
             }
             upstream = [u for u in upstream if u[0] not in same_agent_keys]
 
+        # Effective role: step override > agent default
+        agent_row = await session.get(AgentModel, step_def.agent_id)
+        step_role = (getattr(step_def, "role", None) or "").strip()
+        effective_role = step_role or ((agent_row.role or "").strip() if agent_row else "")
+        role_name, role_desc = await _role_hint(session, effective_role)
+
         prompt = _build_step_prompt(
             global_task,
             step_def.label,
             step_def.step_key,
             upstream,
+            role=effective_role,
+            role_name=role_name,
+            role_desc=role_desc,
             conversation_history=conversation_history,
         )
         run_svc = RunService(session)

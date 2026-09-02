@@ -62,13 +62,21 @@ class AgentService:
 
     async def create_agent(self, data: AgentCreate) -> AgentRead:
         await self._ensure_provider(data.provider_id)
+        role = data.role.strip() if data.role else ""
+        system_prompt = data.system_prompt
+        if role and not (system_prompt or "").strip():
+            from app.services.role_service import RoleService
+
+            role_row = await RoleService(self.db).get_by_code(role)
+            if role_row and role_row.system_prompt:
+                system_prompt = role_row.system_prompt
         row = AgentModel(
             id=new_id("agt"),
             name=data.name,
             provider_id=data.provider_id,
             model=data.model,
-            role=data.role,
-            system_prompt=data.system_prompt,
+            role=role,
+            system_prompt=system_prompt,
             workspace_path=data.workspace_path,
             permissions=data.permissions.model_dump(),
             limits=data.limits.model_dump(),
@@ -90,6 +98,8 @@ class AgentService:
         if data.limits is not None:
             row.limits = data.limits.model_dump()
             updates.pop("limits", None)
+        if "role" in updates and updates["role"] is not None:
+            updates["role"] = str(updates["role"]).strip()
         for key, value in updates.items():
             setattr(row, key, value)
         await self.db.flush()

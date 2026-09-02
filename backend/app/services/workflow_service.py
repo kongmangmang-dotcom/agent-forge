@@ -15,6 +15,42 @@ from app.schemas.workflow import (
     WorkflowStepDefRead,
 )
 
+# 预设分类标签（创建页可点选；也可自定义）
+WELL_KNOWN_WORKFLOW_TAGS = ("计划", "开发")
+
+
+def _normalize_tags(raw: list | None) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw or []:
+        tag = str(item).strip()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag)
+    return out
+
+
+def _tags_from_options(options: dict | None) -> list[str]:
+    if not isinstance(options, dict):
+        return []
+    raw = options.get("tags")
+    return _normalize_tags(raw if isinstance(raw, list) else None)
+
+
+def _options_with_tags(
+    options: dict | None,
+    tags: list[str] | None,
+    *,
+    tags_provided: bool,
+) -> dict:
+    merged = dict(options or {})
+    if tags_provided:
+        merged["tags"] = _normalize_tags(tags)
+    elif "tags" in merged:
+        merged["tags"] = _tags_from_options(merged)
+    return merged
+
 
 def _step_read(step: WorkflowStepDefModel, agent_names: dict[str, str]) -> WorkflowStepDefRead:
     return WorkflowStepDefRead(
@@ -23,6 +59,7 @@ def _step_read(step: WorkflowStepDefModel, agent_names: dict[str, str]) -> Workf
         label=step.label,
         agent_id=step.agent_id,
         agent_name=agent_names.get(step.agent_id),
+        role=(step.role or "").strip(),
         depends_on=step.depends_on or [],
         parallel=step.parallel,
         sort_order=step.sort_order,
@@ -32,12 +69,14 @@ def _step_read(step: WorkflowStepDefModel, agent_names: dict[str, str]) -> Workf
 def _definition_read(
     row: WorkflowDefinitionModel, agent_names: dict[str, str]
 ) -> WorkflowDefinitionRead:
+    options = row.options or {}
     return WorkflowDefinitionRead(
         id=row.id,
         name=row.name,
         title=row.title,
         description=row.description,
-        options=row.options or {},
+        tags=_tags_from_options(options),
+        options=options,
         created_at=row.created_at,
         steps=[_step_read(s, agent_names) for s in row.steps],
     )
@@ -117,6 +156,7 @@ class WorkflowService:
                     name=row.name,
                     title=row.title,
                     description=row.description,
+                    tags=_tags_from_options(row.options),
                     step_count=count or 0,
                     created_at=row.created_at,
                 )
@@ -157,7 +197,7 @@ class WorkflowService:
             name=data.name,
             title=data.title,
             description=data.description,
-            options=data.options,
+            options=_options_with_tags(data.options, data.tags, tags_provided=True),
         )
         self.db.add(row)
         try:
@@ -174,6 +214,7 @@ class WorkflowService:
                     workflow_id=wf_id,
                     step_key=step.step_key,
                     label=step.label,
+                    role=(step.role or "").strip(),
                     agent_id=step.agent_id,
                     depends_on=step.depends_on,
                     parallel=step.parallel,
@@ -199,10 +240,23 @@ class WorkflowService:
         # Keep Pydantic step models for attribute access in _validate_steps / ORM insert.
         steps_payload = data.steps if "steps" in updates else None
         updates.pop("steps", None)
+        tags_provided = "tags" in updates
+        tags_payload = updates.pop("tags", None)
+        options_provided = "options" in updates
 
         # Shallow-merge options so partial updates don't wipe flags like is_default_dev_plan.
-        if "options" in updates and updates["options"] is not None:
-            row.options = {**(row.options or {}), **updates.pop("options")}
+        base_options = dict(row.options or {})
+        if options_provided and updates.get("options") is not None:
+            base_options = {**base_options, **(updates.pop("options") or {})}
+        elif options_provided:
+            updates.pop("options", None)
+
+        if tags_provided or options_provided:
+            row.options = _options_with_tags(
+                base_options,
+                tags_payload,
+                tags_provided=tags_provided,
+            )
 
         for key, value in updates.items():
             setattr(row, key, value)
@@ -218,6 +272,7 @@ class WorkflowService:
                         workflow_id=definition_id,
                         step_key=step.step_key,
                         label=step.label,
+                        role=(step.role or "").strip(),
                         agent_id=step.agent_id,
                         depends_on=step.depends_on,
                         parallel=step.parallel,

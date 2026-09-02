@@ -82,6 +82,8 @@ class CliCodingProvider:
     # 是否通过 stdin 与子进程交互（用于 inject_message）。Codex 非交互 exec 会把
     # stdin 当 prompt 追加而非运行中对话，因此关闭 stdin，避免子进程阻塞等待输入。
     uses_stdin: bool = True
+    # 将初始 prompt 经 stdin 喂入（argv 用 "-"）。用于避开 Windows 命令行长度限制。
+    prompt_via_stdin: bool = False
 
     def _command(self, config: ProviderConfig) -> str:
         return str(config.config.get("cli_command") or self.default_command)
@@ -206,9 +208,12 @@ class CliCodingProvider:
         Path(workspace).mkdir(parents=True, exist_ok=True)
 
         argv = self._build_argv(config, agent, task.prompt)
-        logger.info("Starting CLI: %s (cwd=%s)", argv, workspace)
+        # 日志不打印完整 prompt，避免把超长文档打进日志
+        log_argv = [a if a != task.prompt else f"<prompt:{len(task.prompt)}chars>" for a in argv]
+        logger.info("Starting CLI: %s (cwd=%s)", log_argv, workspace)
 
-        stdin = asyncio.subprocess.PIPE if self.uses_stdin else asyncio.subprocess.DEVNULL
+        need_stdin = self.uses_stdin or self.prompt_via_stdin
+        stdin = asyncio.subprocess.PIPE if need_stdin else asyncio.subprocess.DEVNULL
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=workspace,
@@ -217,6 +222,13 @@ class CliCodingProvider:
             stdin=stdin,
             limit=1024 * 1024,
         )
+
+        if self.prompt_via_stdin and proc.stdin is not None:
+            try:
+                proc.stdin.write((task.prompt or "").encode("utf-8"))
+                await proc.stdin.drain()
+            finally:
+                proc.stdin.close()
 
         active = ActiveRunSession(
             handle=handle,
@@ -231,7 +243,7 @@ class CliCodingProvider:
             agent_id=agent.id,
             type=EventType.SESSION_CREATED,
             status=RunStatus.RUNNING,
-            content=f"CLI 进程已启动: {' '.join(argv)}",
+            content=f"CLI 进程已启动: {' '.join(log_argv)}",
         )
         yield AgentEvent(
             run_id=run_id,
@@ -249,7 +261,15 @@ class CliCodingProvider:
                 line = await proc.stderr.readline()
                 if not line:
                     break
-                stderr_chunks.append(line.decode(errors="replace"))
+                try:
+                    text = line.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = (
+                        line.decode("gbk", errors="replace")
+                        if sys.platform == "win32"
+                        else line.decode(errors="replace")
+                    )
+                stderr_chunks.append(text)
 
         stderr_task = asyncio.create_task(read_stderr())
 
@@ -372,13 +392,16 @@ class CodexCliProvider(CliCodingProvider):
     # codex 0.150+ 已移除 --full-auto；--json 输出 JSONL 事件流（见 codex_event_mapper）。
     default_args = ["exec", "--json"]
 
+    # 运行中不可 inject；初始 prompt 走 stdin，避免 Windows argv 超长。
     uses_stdin = False
+    prompt_via_stdin = True
 
     def _build_argv(self, config: ProviderConfig, agent: AgentConfig, prompt: str) -> list[str]:
         cmd = self._command(config)
         args = self._extra_args(config)
         sandbox = str(config.config.get("sandbox") or "workspace-write")
-        return [*self._resolve_exec(cmd), *args, "--sandbox", sandbox, "--skip-git-repo-check", prompt]
+        # PROMPT 使用 "-"：从 stdin 读取初始指令（见 `codex exec --help`）
+        return [*self._resolve_exec(cmd), *args, "--sandbox", sandbox, "--skip-git-repo-check", "-"]
 
     def _map_event(self, parsed: dict[str, Any], run_id: str, agent_id: str) -> list[AgentEvent]:
         return map_codex_event(parsed, run_id, agent_id)

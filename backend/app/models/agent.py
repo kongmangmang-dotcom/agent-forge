@@ -18,7 +18,7 @@ class AgentModel(Base):
     name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     provider_id: Mapped[str] = mapped_column(String, ForeignKey("provider.id"), nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False, default="")
-    role: Mapped[str] = mapped_column(String, nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False, default="")
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
     workspace_path: Mapped[str] = mapped_column(String, nullable=False, default="")
     permissions: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
