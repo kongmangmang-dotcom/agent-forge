@@ -52,6 +52,13 @@ def _options_with_tags(
     return merged
 
 
+def _normalize_on_complete(value: str | None) -> str:
+    v = (value or "none").strip().lower()
+    if v in ("none", "notify", "confirm"):
+        return v
+    return "none"
+
+
 def _step_read(step: WorkflowStepDefModel, agent_names: dict[str, str]) -> WorkflowStepDefRead:
     return WorkflowStepDefRead(
         id=step.id,
@@ -62,6 +69,7 @@ def _step_read(step: WorkflowStepDefModel, agent_names: dict[str, str]) -> Workf
         role=(step.role or "").strip(),
         depends_on=step.depends_on or [],
         parallel=step.parallel,
+        on_complete=_normalize_on_complete(getattr(step, "on_complete", None)),
         sort_order=step.sort_order,
     )
 
@@ -132,6 +140,9 @@ class WorkflowService:
             for dep in step.depends_on:
                 if dep not in keys:
                     raise ValidationError(f"depends_on references unknown step_key: {dep}")
+            oc = _normalize_on_complete(getattr(step, "on_complete", None))
+            if oc not in ("none", "notify", "confirm"):
+                raise ValidationError("on_complete must be none|notify|confirm")
         depends_map = {s.step_key: list(s.depends_on) for s in steps}
         _validate_dag_acyclic(keys, depends_map)
 
@@ -218,6 +229,7 @@ class WorkflowService:
                     agent_id=step.agent_id,
                     depends_on=step.depends_on,
                     parallel=step.parallel,
+                    on_complete=_normalize_on_complete(step.on_complete),
                     sort_order=step.sort_order,
                 )
             )
@@ -276,6 +288,7 @@ class WorkflowService:
                         agent_id=step.agent_id,
                         depends_on=step.depends_on,
                         parallel=step.parallel,
+                        on_complete=_normalize_on_complete(step.on_complete),
                         sort_order=step.sort_order,
                     )
                 )

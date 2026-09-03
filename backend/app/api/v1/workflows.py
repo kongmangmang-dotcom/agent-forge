@@ -77,6 +77,13 @@ async def get_workflow_run(workflow_run_id: str, db: AsyncSession = Depends(get_
     return await OrchestratorService(db).get_run(workflow_run_id)
 
 
+@router.post("/runs/{workflow_run_id}/continue", response_model=WorkflowRunRead)
+async def continue_workflow_run(
+    workflow_run_id: str, db: AsyncSession = Depends(get_session)
+):
+    return await OrchestratorService(db).continue_workflow(workflow_run_id)
+
+
 @router.get(
     "/runs/{workflow_run_id}/terminate-preview",
     response_model=WorkflowTerminatePreview,

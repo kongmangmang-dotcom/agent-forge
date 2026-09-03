@@ -19,13 +19,16 @@ from app.schemas.knowledge import (
     KnowledgeDocumentCreate,
     KnowledgeDocumentDetail,
     KnowledgeDocumentRead,
+    KnowledgeDocumentsFromNotes,
     KnowledgeSearchHit,
     KnowledgeSearchRequest,
     KnowledgeSearchResponse,
     KnowledgeSegmentRead,
 )
-from app.services.knowledge_chunk import chunk_text
+from app.services.knowledge_chunk import chunk_text_by_token
 from app.services.knowledge_chat import chat_backend_name, chat_complete
+from app.services.doc_parse import parse_document_bytes
+from app.services.text_clean import DEFAULT_RULES, clean_text
 from app.services.knowledge_embed import (
     cosine_similarity,
     default_embedding_model,
@@ -33,6 +36,7 @@ from app.services.knowledge_embed import (
     embed_texts,
     embedding_backend_name,
 )
+from app.services import knowledge_vector as kv
 
 
 def _now() -> datetime:
@@ -103,6 +107,8 @@ class KnowledgeService:
 
     async def delete_base(self, knowledge_id: str) -> None:
         row = await self._get_base_row(knowledge_id)
+        if kv.milvus_enabled():
+            await self._milvus_call(kv.delete_by_knowledge_id, knowledge_id)
         await self.db.delete(row)
         await self.db.commit()
 
@@ -123,7 +129,7 @@ class KnowledgeService:
         self, knowledge_id: str, data: KnowledgeDocumentCreate
     ) -> KnowledgeDocumentRead:
         base = await self._get_base_row(knowledge_id)
-        content = data.content.strip()
+        content = clean_text(data.content.strip(), rules=DEFAULT_RULES)
         if not content:
             raise ValidationError("文档内容不能为空")
         doc = KnowledgeDocumentModel(
@@ -144,6 +150,129 @@ class KnowledgeService:
         await self.db.refresh(doc)
         return await self._doc_to_read(doc)
 
+    async def create_document_from_upload(
+        self,
+        knowledge_id: str,
+        *,
+        filename: str,
+        data: bytes,
+        segment_max_chars: int = 800,
+        clean_rules: list[str] | None = None,
+    ) -> KnowledgeDocumentRead:
+        base = await self._get_base_row(knowledge_id)
+        try:
+            parsed = parse_document_bytes(data, filename)
+        except Exception as exc:
+            raise ValidationError(f"文档解析失败: {exc}") from exc
+        content = clean_text(parsed.text, rules=clean_rules or DEFAULT_RULES)
+        if not content.strip():
+            raise ValidationError("清洗后文档内容为空")
+        name = (filename or "upload").strip() or "upload"
+        doc = KnowledgeDocumentModel(
+            id=new_id("kdoc"),
+            knowledge_id=base.id,
+            name=name[:200],
+            content=content,
+            content_length=len(content),
+            segment_max_chars=segment_max_chars,
+            status="indexing",
+        )
+        self.db.add(doc)
+        await self.db.flush()
+        await self._rebuild_segments(base, doc)
+        doc.status = "indexed"
+        doc.updated_at = _now()
+        await self.db.commit()
+        await self.db.refresh(doc)
+        return await self._doc_to_read(doc)
+
+    async def create_documents_from_notes(
+        self, knowledge_id: str, data: KnowledgeDocumentsFromNotes
+    ) -> list[KnowledgeDocumentRead]:
+        from pathlib import Path
+
+        from app.models.agent import AgentModel
+        from app.models.schedule import DailyTaskModel, TaskNoteModel
+        from app.services.task_note_sync import _is_markdown_path, _read_markdown_body
+
+        base = await self._get_base_row(knowledge_id)
+        note_ids = [n.strip() for n in data.note_ids if n and str(n).strip()]
+        if not note_ids:
+            raise ValidationError("请至少选择一条笔记")
+
+        result = await self.db.execute(
+            select(TaskNoteModel, DailyTaskModel)
+            .join(DailyTaskModel, DailyTaskModel.id == TaskNoteModel.daily_task_id)
+            .where(TaskNoteModel.id.in_(note_ids))
+        )
+        rows = list(result.all())
+        found = {n.id for n, _ in rows}
+        missing = [nid for nid in note_ids if nid not in found]
+        if missing:
+            raise NotFoundError("TaskNote", missing[0])
+
+        # Prefer any agent workspace for reading file_path notes.
+        workspace = "workspace/demo"
+        agent = (
+            await self.db.execute(select(AgentModel).order_by(AgentModel.created_at.asc()).limit(1))
+        ).scalar_one_or_none()
+        if agent and (agent.workspace_path or "").strip():
+            workspace = agent.workspace_path.strip()
+
+        created: list[KnowledgeDocumentRead] = []
+        for note, task in rows:
+            body = (note.body or "").strip()
+            path = (note.file_path or "").strip()
+            content = body
+            if not content and path:
+                if _is_markdown_path(path):
+                    content = _read_markdown_body(workspace, path).strip()
+                else:
+                    try:
+                        p = Path(path)
+                        if not p.is_absolute():
+                            p = Path(workspace) / path
+                        if p.is_file():
+                            content = p.read_text(encoding="utf-8", errors="replace").strip()
+                    except OSError:
+                        content = ""
+            if not content:
+                raise ValidationError(
+                    f"笔记「{(note.title or note.id)}」没有可入库的正文（body / 文件路径为空或不可读）"
+                )
+
+            title = (note.title or "").strip()
+            if not title:
+                title = path.replace("\\", "/").split("/")[-1] if path else f"note-{note.id[-6:]}"
+            name = f"{task.title} · {title}"
+            header = (
+                f"# {title}\n\n"
+                f"> 来源任务: {task.title}（{task.plan_date}）\n"
+                + (f"> 来源路径: `{path}`\n" if path else "")
+                + "\n"
+            )
+            raw = header + content
+            cleaned = clean_text(raw, rules=DEFAULT_RULES)
+            doc = KnowledgeDocumentModel(
+                id=new_id("kdoc"),
+                knowledge_id=base.id,
+                name=name[:200],
+                content=cleaned,
+                content_length=len(cleaned),
+                segment_max_chars=data.segment_max_chars,
+                status="indexing",
+            )
+            self.db.add(doc)
+            await self.db.flush()
+            await self._rebuild_segments(base, doc)
+            doc.status = "indexed"
+            doc.updated_at = _now()
+            await self.db.flush()
+            created.append(await self._doc_to_read(doc))
+
+        await self.db.commit()
+        return created
+
     async def get_document(self, document_id: str) -> KnowledgeDocumentDetail:
         doc = await self._get_doc_row(document_id)
         read = await self._doc_to_read(doc)
@@ -151,6 +280,8 @@ class KnowledgeService:
 
     async def delete_document(self, document_id: str) -> None:
         doc = await self._get_doc_row(document_id)
+        if kv.milvus_enabled():
+            await self._milvus_call(kv.delete_by_document_id, document_id)
         await self.db.delete(doc)
         await self.db.commit()
 
@@ -206,6 +337,45 @@ class KnowledgeService:
         )
 
         qvec = await embed_query(query, model=base.embedding_model or None)
+
+        if kv.milvus_enabled():
+            try:
+                hits = await self._milvus_call(
+                    kv.search, knowledge_id, qvec, max(top_k * 3, top_k)
+                )
+            except Exception as exc:
+                raise ValidationError(f"Milvus 检索失败: {exc}") from exc
+            scored: list[KnowledgeSearchHit] = []
+            if hits:
+                id_score = {sid: score for sid, score in hits if score >= threshold}
+                if id_score:
+                    result = await self.db.execute(
+                        select(KnowledgeSegmentModel, KnowledgeDocumentModel.name)
+                        .join(
+                            KnowledgeDocumentModel,
+                            KnowledgeDocumentModel.id == KnowledgeSegmentModel.document_id,
+                        )
+                        .where(
+                            KnowledgeSegmentModel.id.in_(list(id_score.keys())),
+                            KnowledgeSegmentModel.status == "active",
+                        )
+                    )
+                    for seg, doc_name in result.all():
+                        scored.append(
+                            KnowledgeSearchHit(
+                                segment_id=seg.id,
+                                document_id=seg.document_id,
+                                document_name=doc_name,
+                                content=seg.content,
+                                score=round(float(id_score.get(seg.id, 0.0)), 6),
+                            )
+                        )
+                    scored.sort(key=lambda h: h.score, reverse=True)
+            return KnowledgeSearchResponse(
+                items=scored[:top_k],
+                embedding_backend=f"{embedding_backend_name()}+milvus",
+            )
+
         result = await self.db.execute(
             select(KnowledgeSegmentModel, KnowledgeDocumentModel.name)
             .join(
@@ -217,7 +387,7 @@ class KnowledgeService:
                 KnowledgeSegmentModel.status == "active",
             )
         )
-        scored: list[KnowledgeSearchHit] = []
+        scored = []
         for seg, doc_name in result.all():
             emb = seg.embedding
             if not isinstance(emb, list) or not emb:
@@ -326,27 +496,58 @@ class KnowledgeService:
         existing = await self.db.execute(
             select(KnowledgeSegmentModel).where(KnowledgeSegmentModel.document_id == doc.id)
         )
-        for old in existing.scalars().all():
+        old_rows = list(existing.scalars().all())
+        old_ids = [s.id for s in old_rows]
+        for old in old_rows:
             await self.db.delete(old)
         await self.db.flush()
 
-        pieces = chunk_text(doc.content, max_chars=doc.segment_max_chars)
+        if kv.milvus_enabled():
+            if old_ids:
+                await self._milvus_call(kv.delete_by_ids, old_ids)
+            else:
+                await self._milvus_call(kv.delete_by_document_id, doc.id)
+
+        pieces = chunk_text_by_token(doc.content, chunk_size=doc.segment_max_chars)
         if not pieces:
             return
         vectors = await embed_texts(pieces, model=base.embedding_model or None)
+        milvus_rows: list[dict] = []
+        store_in_pg = not kv.milvus_enabled()
         for text, emb in zip(pieces, vectors):
+            seg_id = new_id("kseg")
             self.db.add(
                 KnowledgeSegmentModel(
-                    id=new_id("kseg"),
+                    id=seg_id,
                     knowledge_id=base.id,
                     document_id=doc.id,
                     content=text,
                     content_length=len(text),
-                    embedding=emb,
+                    embedding=emb if store_in_pg else None,
                     status="active",
                 )
             )
+            if kv.milvus_enabled():
+                milvus_rows.append(
+                    {
+                        "id": seg_id,
+                        "knowledge_id": base.id,
+                        "document_id": doc.id,
+                        "embedding": emb,
+                    }
+                )
         await self.db.flush()
+        if milvus_rows:
+            try:
+                await self._milvus_call(kv.upsert_segments, milvus_rows)
+            except Exception as exc:
+                raise ValidationError(f"Milvus 写入失败: {exc}") from exc
+
+    @staticmethod
+    async def _milvus_call(fn, *args, **kwargs):
+        import asyncio
+
+        return await asyncio.to_thread(fn, *args, **kwargs)
 
     async def _get_base_row(self, knowledge_id: str) -> KnowledgeBaseModel:
         row = await self.db.get(KnowledgeBaseModel, knowledge_id)

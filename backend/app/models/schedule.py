@@ -24,6 +24,12 @@ class DailyTaskModel(Base):
     bound_workflow_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     plan_author: Mapped[str | None] = mapped_column(String, nullable=True)
     plan_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    continued_from_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("daily_task.id", ondelete="SET NULL"), nullable=True
+    )
+    continued_to_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("daily_task.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

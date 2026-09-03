@@ -20,6 +20,7 @@ from app.schemas.schedule import (
     PlanTodayRequest,
     PlanTodayResponse,
     RegeneratePlanRequest,
+    ContinueTaskRequest,
     StartTaskWorkflowRequest,
     TaskAgentChatRequest,
     TaskAgentChatResponse,
@@ -27,6 +28,7 @@ from app.schemas.schedule import (
     TaskMemoryRead,
     TaskMemoryUpdate,
     TaskNoteCreate,
+    TaskNoteListItem,
     TaskNoteRead,
     TaskNoteUpdate,
 )
@@ -67,6 +69,17 @@ async def list_tasks(
     return {"items": items}
 
 
+@router.get("/notes", response_model=ListResponse[TaskNoteListItem])
+async def list_notes(
+    plan_date: date | None = Query(None),
+    days: int | None = Query(None, ge=1, le=90),
+    db: AsyncSession = Depends(get_session),
+):
+    """List notes/documents from schedule tasks (for knowledge base ingest)."""
+    items = await ScheduleService(db).list_notes(plan_date=plan_date, days=days)
+    return {"items": items}
+
+
 @router.post("/tasks", response_model=DailyTaskRead, status_code=201)
 async def create_task(body: DailyTaskCreate, db: AsyncSession = Depends(get_session)):
     return await ScheduleService(db).create_task(body)
@@ -92,6 +105,18 @@ async def update_task(
     task_id: str, body: DailyTaskUpdate, db: AsyncSession = Depends(get_session)
 ):
     return await ScheduleService(db).update_task(task_id, body)
+
+
+@router.post("/tasks/{task_id}/continue", response_model=DailyTaskRead, status_code=201)
+async def continue_task(
+    task_id: str,
+    body: ContinueTaskRequest | None = None,
+    db: AsyncSession = Depends(get_session),
+):
+    return await ScheduleService(db).continue_task(
+        task_id,
+        target_date=body.target_date if body else None,
+    )
 
 
 @router.delete("/tasks/{task_id}", status_code=204)
@@ -179,6 +204,29 @@ async def delete_note(
 ):
     await ScheduleService(db).delete_note(task_id, note_id)
     return Response(status_code=204)
+
+
+@router.get("/tasks/{task_id}/notes/{note_id}/download")
+async def download_note(
+    task_id: str, note_id: str, db: AsyncSession = Depends(get_session)
+):
+    from urllib.parse import quote
+
+    from fastapi.responses import Response as FastAPIResponse
+
+    filename, content, media_type = await ScheduleService(db).get_note_download(
+        task_id, note_id
+    )
+    # RFC 5987 filename* for non-ASCII titles
+    disposition = (
+        f"attachment; filename=\"{filename.encode('ascii', 'replace').decode('ascii')}\"; "
+        f"filename*=UTF-8''{quote(filename)}"
+    )
+    return FastAPIResponse(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": disposition},
+    )
 
 
 @router.post("/tasks/{task_id}/memories", response_model=TaskMemoryRead, status_code=201)

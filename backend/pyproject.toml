@@ -13,6 +13,11 @@ dependencies = [
     "redis>=5.2.0",
     "httpx>=0.28.0",
     "sse-starlette>=2.1.0",
+    "pymilvus>=2.4.0",
+    "tiktoken>=0.7.0",
+    "pymupdf>=1.24.0",
+    "python-docx>=1.1.0",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
@@ -36,3 +41,4 @@ target-version = "py312"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+

@@ -181,6 +181,7 @@ class ScheduleService:
 
         plan_reads = [self._item_read(i, names) for i in row.plan_items]
         workflow_plans = await self._build_workflow_plans(row, bound, plan_reads)
+        lineage = await self._lineage_info(row)
 
         return DailyTaskRead(
             id=row.id,
@@ -199,6 +200,12 @@ class ScheduleService:
             latest_workflow_run_id=latest.id if latest else None,
             plan_author=row.plan_author,
             plan_updated_at=row.plan_updated_at,
+            continued_from_id=row.continued_from_id,
+            continued_to_id=row.continued_to_id,
+            continued_from_plan_date=lineage.get("from_date"),
+            continued_from_title=lineage.get("from_title"),
+            continued_to_plan_date=lineage.get("to_date"),
+            continued_to_title=lineage.get("to_title"),
             created_at=row.created_at,
             updated_at=row.updated_at,
             plan_items=plan_reads,
@@ -206,6 +213,29 @@ class ScheduleService:
             notes=[self._note_read(n) for n in notes],
             memories=[self._memory_read(m) for m in memories],
         )
+
+    async def _lineage_info(self, row: DailyTaskModel) -> dict:
+        out: dict = {
+            "from_date": None,
+            "from_title": None,
+            "to_date": None,
+            "to_title": None,
+        }
+        if row.continued_from_id:
+            src = await self.db.get(DailyTaskModel, row.continued_from_id)
+            if src:
+                out["from_date"] = src.plan_date
+                out["from_title"] = src.title
+        if row.continued_to_id:
+            dst = await self.db.get(DailyTaskModel, row.continued_to_id)
+            if dst:
+                out["to_date"] = dst.plan_date
+                out["to_title"] = dst.title
+            else:
+                # Dangling pointer — allow re-continue later
+                row.continued_to_id = None
+                await self.db.flush()
+        return out
 
     async def _build_workflow_plans(
         self,
@@ -289,6 +319,19 @@ class ScheduleService:
             bound = self._bound_ids(row)
             if row.workflow_definition_id and row.workflow_definition_id not in bound:
                 bound = [*bound, row.workflow_definition_id]
+            from_date = None
+            to_date = None
+            if row.continued_from_id:
+                src = await self.db.get(DailyTaskModel, row.continued_from_id)
+                if src:
+                    from_date = src.plan_date
+            if row.continued_to_id:
+                dst = await self.db.get(DailyTaskModel, row.continued_to_id)
+                if dst:
+                    to_date = dst.plan_date
+                else:
+                    row.continued_to_id = None
+                    await self.db.flush()
             items.append(
                 DailyTaskSummary(
                     id=row.id,
@@ -307,10 +350,60 @@ class ScheduleService:
                     plan_done_count=sum(1 for p in plan_items if p.status == "done"),
                     plan_author=row.plan_author,
                     plan_updated_at=row.plan_updated_at,
+                    continued_from_id=row.continued_from_id,
+                    continued_to_id=row.continued_to_id,
+                    continued_from_plan_date=from_date,
+                    continued_to_plan_date=to_date,
                     created_at=row.created_at,
                 )
             )
         return items
+
+    async def list_notes(
+        self,
+        plan_date: date | None = None,
+        days: int | None = None,
+    ):
+        """List task notes for a day or recent N days (for knowledge ingest picker)."""
+        from datetime import timedelta
+
+        from app.schemas.schedule import TaskNoteListItem
+
+        q = (
+            select(TaskNoteModel, DailyTaskModel)
+            .join(DailyTaskModel, DailyTaskModel.id == TaskNoteModel.daily_task_id)
+            .order_by(DailyTaskModel.plan_date.desc(), TaskNoteModel.created_at.desc())
+        )
+        if days is not None and days > 0:
+            start = date.today() - timedelta(days=max(0, days - 1))
+            q = q.where(DailyTaskModel.plan_date >= start)
+        else:
+            day = plan_date or date.today()
+            q = q.where(DailyTaskModel.plan_date == day)
+
+        result = await self.db.execute(q)
+        out: list[TaskNoteListItem] = []
+        for note, task in result.all():
+            body = (note.body or "").strip()
+            path = (note.file_path or "").strip()
+            preview = body[:160] if body else (path or "")
+            out.append(
+                TaskNoteListItem(
+                    id=note.id,
+                    daily_task_id=task.id,
+                    task_title=task.title,
+                    plan_date=task.plan_date,
+                    kind=note.kind,
+                    title=(note.title or "").strip()
+                    or (path.replace("\\", "/").split("/")[-1] if path else "未命名笔记"),
+                    body_preview=preview,
+                    file_path=path,
+                    has_content=bool(body or path),
+                    created_at=note.created_at,
+                    updated_at=note.updated_at,
+                )
+            )
+        return out
 
     async def day_overview(self, plan_date: date | None = None) -> DayOverview:
         day = plan_date or date.today()
@@ -570,6 +663,114 @@ class ScheduleService:
 
         await self.db.flush()
         return await self.get_task(row.id)
+
+    async def continue_task(
+        self, task_id: str, *, target_date: date | None = None
+    ) -> DailyTaskRead:
+        """Clone an unfinished task onto target_date (default today) with lineage."""
+        day = target_date or date.today()
+        result = await self.db.execute(
+            select(DailyTaskModel)
+            .options(
+                selectinload(DailyTaskModel.plan_items),
+                selectinload(DailyTaskModel.notes),
+                selectinload(DailyTaskModel.memories),
+            )
+            .where(DailyTaskModel.id == task_id)
+        )
+        src = result.scalar_one_or_none()
+        if not src:
+            raise NotFoundError("DailyTask", task_id)
+
+        if src.plan_date == day:
+            raise ValidationError("任务已在目标日期，无需续作")
+
+        if src.continued_to_id:
+            existing = await self.db.get(DailyTaskModel, src.continued_to_id)
+            if existing:
+                raise ConflictError(
+                    "TASK_ALREADY_CONTINUED",
+                    f"该任务已续作到 {existing.plan_date.isoformat()}（{existing.title}）",
+                )
+            src.continued_to_id = None
+
+        if src.status == "done":
+            raise ValidationError("已完成任务不能续作；请先改回进行中或待办")
+
+        bound = self._bound_ids(src)
+        if src.workflow_definition_id and src.workflow_definition_id not in bound:
+            bound = [*bound, src.workflow_definition_id]
+
+        carry_note = f"续自 {src.plan_date.isoformat()}「{src.title}」"
+        summary = (src.summary or "").strip()
+        if carry_note not in summary:
+            summary = f"{carry_note}。{summary}".strip("。") if summary else carry_note
+
+        new_status = "in_progress" if src.status == "in_progress" else "todo"
+        new_id_val = new_id("tsk")
+        clone = DailyTaskModel(
+            id=new_id_val,
+            plan_date=day,
+            title=src.title,
+            type=src.type if src.type in ("normal", "dev") else "normal",
+            status=new_status,
+            priority=src.priority if src.priority in ("high", "medium", "low") else "medium",
+            summary=summary,
+            requirement=src.requirement or "",
+            workflow_definition_id=src.workflow_definition_id,
+            bound_workflow_ids=list(bound),
+            plan_author=src.plan_author,
+            plan_updated_at=datetime.now(timezone.utc),
+            continued_from_id=src.id,
+        )
+        self.db.add(clone)
+
+        for item in sorted(src.plan_items or [], key=lambda x: x.sort_order):
+            self.db.add(
+                TaskPlanItemModel(
+                    id=new_id("tpi"),
+                    daily_task_id=new_id_val,
+                    sort_order=item.sort_order,
+                    scheduled_time=item.scheduled_time,
+                    title=item.title,
+                    detail=item.detail or "",
+                    status=item.status if item.status in ("todo", "in_progress", "done") else "todo",
+                    agent_id=item.agent_id,
+                    linked_step_key=item.linked_step_key,
+                    workflow_definition_id=item.workflow_definition_id,
+                )
+            )
+
+        for note in src.notes or []:
+            body = note.body or ""
+            path = (note.file_path or "").replace(src.id, new_id_val)
+            self.db.add(
+                TaskNoteModel(
+                    id=new_id("tn"),
+                    daily_task_id=new_id_val,
+                    kind=note.kind if note.kind in ("markdown", "file") else "markdown",
+                    title=note.title or "",
+                    body=body,
+                    file_path=path,
+                )
+            )
+
+        for mem in src.memories or []:
+            tags = mem.tags if isinstance(mem.tags, list) else []
+            self.db.add(
+                TaskMemoryModel(
+                    id=new_id("tm"),
+                    daily_task_id=new_id_val,
+                    content=mem.content or "",
+                    tags=[str(t) for t in tags],
+                    pinned=bool(mem.pinned),
+                )
+            )
+
+        await self.db.flush()
+        src.continued_to_id = new_id_val
+        await self.db.flush()
+        return await self.get_task(new_id_val)
 
     async def update_task(self, task_id: str, data: DailyTaskUpdate) -> DailyTaskRead:
         result = await self.db.execute(
@@ -1107,6 +1308,67 @@ class ScheduleService:
             raise NotFoundError("TaskNote", note_id)
         await self.db.delete(note)
         await self.db.flush()
+
+    async def get_note_download(
+        self, task_id: str, note_id: str
+    ) -> tuple[str, bytes, str]:
+        """Return (filename, content_bytes, media_type) for a task note."""
+        from pathlib import Path
+
+        from app.services.task_note_sync import _is_markdown_path, _read_markdown_body
+
+        result = await self.db.execute(
+            select(TaskNoteModel).where(
+                TaskNoteModel.id == note_id,
+                TaskNoteModel.daily_task_id == task_id,
+            )
+        )
+        note = result.scalar_one_or_none()
+        if not note:
+            raise NotFoundError("TaskNote", note_id)
+
+        workspace = await self._resolve_workspace_for_task(task_id)
+        body = (note.body or "").strip()
+        path = (note.file_path or "").strip()
+        content = body
+        if not content and path:
+            if _is_markdown_path(path):
+                content = _read_markdown_body(workspace, path).strip()
+            else:
+                p = Path(path)
+                if not p.is_absolute():
+                    p = Path(workspace) / path
+                if p.is_file():
+                    content = p.read_text(encoding="utf-8", errors="replace")
+
+        if not content.strip():
+            raise ValidationError("该笔记没有可下载的内容")
+
+        title = (note.title or "").strip() or note.id
+        # Prefer original filename from path when present
+        if path:
+            leaf = Path(path.replace("\\", "/")).name
+            if leaf:
+                title = leaf
+        safe = "".join(ch if ch.isalnum() or ch in "-_. " else "_" for ch in title).strip(" ._")
+        safe = safe or note.id
+        if not any(safe.lower().endswith(ext) for ext in (".md", ".txt", ".markdown", ".json", ".yaml", ".yml")):
+            safe = f"{safe}.md"
+        media = "text/markdown; charset=utf-8" if safe.lower().endswith((".md", ".markdown")) else "text/plain; charset=utf-8"
+        return safe, content.encode("utf-8"), media
+
+    async def _resolve_workspace_for_task(self, task_id: str) -> str:
+        task = await self.get_task(task_id)
+        if task.workflow_definition_id:
+            return await self._workspace_for_workflow(task.workflow_definition_id)
+        # Fallback: first agent workspace or demo
+        result = await self.db.execute(
+            select(AgentModel).order_by(AgentModel.created_at.asc()).limit(1)
+        )
+        agent = result.scalar_one_or_none()
+        if agent and (agent.workspace_path or "").strip():
+            return agent.workspace_path.strip()
+        return "workspace/demo"
 
     async def create_memory(self, task_id: str, data: TaskMemoryCreate) -> TaskMemoryRead:
         await self._require_task(task_id)

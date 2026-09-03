@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
     embedding_model: str = "text-embedding-3-small"
 
+    # Vector store: milvus | postgres (JSONB cosine). Default milvus for local/dev.
+    vector_store: str = "milvus"
+    milvus_host: str = "127.0.0.1"
+    milvus_port: int = 19530
+    milvus_collection: str = "agentforge_knowledge_segment"
+
     # Knowledge Q&A chat (optional; falls back to extractive answer from retrieved chunks)
     chat_api_url: str = ""
     chat_api_key: str = ""

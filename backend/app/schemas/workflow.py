@@ -13,6 +13,7 @@ class WorkflowStepDefCreate(BaseModel):
     role: str = ""
     depends_on: list[str] = Field(default_factory=list)
     parallel: bool = False
+    on_complete: str = "none"  # none | notify | confirm
     sort_order: int = 0
 
 
@@ -43,6 +44,7 @@ class WorkflowStepDefRead(ORMModel):
     role: str = ""
     depends_on: list[str]
     parallel: bool
+    on_complete: str = "none"
     sort_order: int
 
 
@@ -82,12 +84,22 @@ class WorkflowStepRunRead(ORMModel):
     role: str = ""
     depends_on: list[str] = Field(default_factory=list)
     parallel: bool = False
+    on_complete: str = "none"
     status: str
     progress: int = 0
     agent_run_id: str | None = None
     summary: str = ""
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+class WorkflowStepNotification(BaseModel):
+    id: str
+    step_key: str
+    label: str
+    kind: str  # notify | confirm
+    at: str
+    agent_run_id: str | None = None
 
 
 class WorkflowRunRead(ORMModel):
@@ -102,6 +114,8 @@ class WorkflowRunRead(ORMModel):
     error_message: str | None = None
     daily_task_id: str | None = None
     linked_note_count: int = 0
+    paused_after_steps: list[str] = Field(default_factory=list)
+    step_notifications: list[WorkflowStepNotification] = Field(default_factory=list)
     steps: list[WorkflowStepRunRead] = Field(default_factory=list)
     started_at: datetime | None = None
     finished_at: datetime | None = None

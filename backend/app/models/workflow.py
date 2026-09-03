@@ -39,6 +39,7 @@ class WorkflowStepDefModel(Base):
     agent_id: Mapped[str] = mapped_column(String, ForeignKey("agent.id"), nullable=False)
     depends_on: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     parallel: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    on_complete: Mapped[str] = mapped_column(String, nullable=False, default="none")
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     workflow: Mapped["WorkflowDefinitionModel"] = relationship(back_populates="steps")

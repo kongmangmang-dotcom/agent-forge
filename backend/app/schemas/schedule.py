@@ -54,6 +54,20 @@ class TaskNoteRead(ORMModel):
     updated_at: datetime
 
 
+class TaskNoteListItem(ORMModel):
+    id: str
+    daily_task_id: str
+    task_title: str
+    plan_date: date
+    kind: str
+    title: str
+    body_preview: str = ""
+    file_path: str = ""
+    has_content: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
 class TaskMemoryCreate(BaseModel):
     content: str = Field(min_length=1)
     tags: list[str] = Field(default_factory=list)
@@ -98,6 +112,10 @@ class DailyTaskUpdate(BaseModel):
     bound_workflow_ids: list[str] | None = None
 
 
+class ContinueTaskRequest(BaseModel):
+    target_date: date | None = None
+
+
 class DailyTaskRead(ORMModel):
     id: str
     plan_date: date
@@ -115,6 +133,12 @@ class DailyTaskRead(ORMModel):
     latest_workflow_run_id: str | None = None
     plan_author: str | None = None
     plan_updated_at: datetime | None = None
+    continued_from_id: str | None = None
+    continued_to_id: str | None = None
+    continued_from_plan_date: date | None = None
+    continued_from_title: str | None = None
+    continued_to_plan_date: date | None = None
+    continued_to_title: str | None = None
     created_at: datetime
     updated_at: datetime
     plan_items: list[TaskPlanItemRead] = Field(default_factory=list)
@@ -140,6 +164,10 @@ class DailyTaskSummary(ORMModel):
     plan_done_count: int = 0
     plan_author: str | None = None
     plan_updated_at: datetime | None = None
+    continued_from_id: str | None = None
+    continued_to_id: str | None = None
+    continued_from_plan_date: date | None = None
+    continued_to_plan_date: date | None = None
     created_at: datetime
 
 class DayOverview(BaseModel):

@@ -42,6 +42,11 @@ class KnowledgeDocumentCreate(BaseModel):
     segment_max_chars: int = Field(default=800, ge=100, le=8000)
 
 
+class KnowledgeDocumentsFromNotes(BaseModel):
+    note_ids: list[str] = Field(min_length=1)
+    segment_max_chars: int = Field(default=800, ge=100, le=8000)
+
+
 class KnowledgeDocumentRead(ORMModel):
     id: str
     knowledge_id: str

@@ -10,7 +10,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.ids import new_id
 from app.domain.enums import RunStatus
 from app.models.agent import AgentModel
@@ -25,6 +25,7 @@ from app.schemas.workflow import (
     WorkflowLinkedNote,
     WorkflowRunRead,
     WorkflowRunSummary,
+    WorkflowStepNotification,
     WorkflowStepRunRead,
     WorkflowTerminatePreview,
     WorkflowTerminateResult,
@@ -279,6 +280,33 @@ class OrchestratorService:
         _orchestrator_tasks[wfr_id] = task
         return row
 
+    async def continue_workflow(self, workflow_run_id: str) -> WorkflowRunRead:
+        """Resume a workflow paused at waiting_approval (step on_complete=confirm)."""
+        result = await self.db.execute(
+            select(WorkflowRunModel).where(WorkflowRunModel.id == workflow_run_id)
+        )
+        row = result.scalar_one_or_none()
+        if not row:
+            raise NotFoundError("WorkflowRun", workflow_run_id)
+        if row.status != RunStatus.WAITING_APPROVAL:
+            raise ValidationError("仅「待确认」状态的工作流可以继续")
+
+        existing = _orchestrator_tasks.get(workflow_run_id)
+        if existing and not existing.done():
+            raise ConflictError("WORKFLOW_BUSY", "编排任务仍在运行，请稍后再试")
+
+        inp = dict(row.input or {})
+        inp.pop("paused_after_steps", None)
+        row.input = inp
+        row.status = RunStatus.RUNNING
+        row.error_message = None
+        row.finished_at = None
+        await self.db.commit()
+
+        task = asyncio.create_task(_orchestrate_workflow(workflow_run_id))
+        _orchestrator_tasks[workflow_run_id] = task
+        return await self.get_run(workflow_run_id)
+
     async def list_runs(self, status: str | None = None) -> list[WorkflowRunSummary]:
         q = (
             select(WorkflowRunModel, WorkflowDefinitionModel.title)
@@ -511,6 +539,8 @@ class OrchestratorService:
                     or ((agent.role or "").strip() if agent else ""),
                     depends_on=list(step_def.depends_on or []),
                     parallel=step_def.parallel,
+                    on_complete=(getattr(step_def, "on_complete", None) or "none").strip()
+                    or "none",
                     status=sr.status,
                     progress=sr.progress,
                     agent_run_id=sr.agent_run_id,
@@ -522,6 +552,28 @@ class OrchestratorService:
 
         inp = row.input or {}
         note_count = await self._linked_note_count(row)
+        raw_notes = inp.get("step_notifications") or []
+        notifications: list[WorkflowStepNotification] = []
+        if isinstance(raw_notes, list):
+            for n in raw_notes:
+                if not isinstance(n, dict):
+                    continue
+                nid = str(n.get("id") or "").strip()
+                sk = str(n.get("step_key") or "").strip()
+                if not nid or not sk:
+                    continue
+                notifications.append(
+                    WorkflowStepNotification(
+                        id=nid,
+                        step_key=sk,
+                        label=str(n.get("label") or sk),
+                        kind=str(n.get("kind") or "notify"),
+                        at=str(n.get("at") or ""),
+                        agent_run_id=(str(n["agent_run_id"]) if n.get("agent_run_id") else None),
+                    )
+                )
+        paused = inp.get("paused_after_steps") or []
+        paused_keys = [str(x) for x in paused] if isinstance(paused, list) else []
         return WorkflowRunRead(
             id=row.id,
             workflow_id=row.workflow_id,
@@ -534,6 +586,8 @@ class OrchestratorService:
             error_message=row.error_message,
             daily_task_id=row.daily_task_id,
             linked_note_count=note_count,
+            paused_after_steps=paused_keys,
+            step_notifications=notifications,
             steps=steps_read,
             started_at=row.started_at,
             finished_at=row.finished_at,
@@ -644,8 +698,76 @@ class OrchestratorService:
                 .execution_options(populate_existing=True)
             )
             step_runs = list(step_runs_result.scalars().all())
+            status_by_key = {s.step_key: s.status for s in step_runs}
             completed = sum(1 for s in step_runs if s.status == RunStatus.COMPLETED)
             wf_run.progress = int(completed / max(len(step_defs), 1) * 100)
+
+            # Per-step on_complete: notify (toast) and/or confirm (pause DAG)
+            wave_done = [
+                step
+                for step, result in zip(ready, results)
+                if result is True
+                and status_by_key.get(step.step_key) == RunStatus.COMPLETED
+            ]
+            notify_steps = [
+                s
+                for s in wave_done
+                if (getattr(s, "on_complete", None) or "none").strip() == "notify"
+            ]
+            confirm_steps = [
+                s
+                for s in wave_done
+                if (getattr(s, "on_complete", None) or "none").strip() == "confirm"
+            ]
+            if notify_steps or confirm_steps:
+                runs_by_key = {s.step_key: s for s in step_runs}
+                inp = dict(wf_run.input or {})
+                notes = list(inp.get("step_notifications") or [])
+                if not isinstance(notes, list):
+                    notes = []
+                now_iso = datetime.now(timezone.utc).isoformat()
+                for s in [*notify_steps, *confirm_steps]:
+                    sr = runs_by_key.get(s.step_key)
+                    notes.append(
+                        {
+                            "id": new_id("sn"),
+                            "step_key": s.step_key,
+                            "label": s.label,
+                            "kind": "confirm"
+                            if (getattr(s, "on_complete", None) or "").strip() == "confirm"
+                            else "notify",
+                            "at": now_iso,
+                            "agent_run_id": sr.agent_run_id if sr else None,
+                        }
+                    )
+                inp["step_notifications"] = notes[-30:]
+                if confirm_steps:
+                    inp["paused_after_steps"] = [s.step_key for s in confirm_steps]
+                    wf_run.input = inp
+                    wf_run.status = RunStatus.WAITING_APPROVAL
+                    wf_run.error_message = None
+                    await self.db.commit()
+                    try:
+                        from app.services.plan_progress_sync import (
+                            sync_plan_items_from_workflow_run,
+                        )
+
+                        await sync_plan_items_from_workflow_run(
+                            self.db, workflow_run_id, commit=True
+                        )
+                    except Exception:
+                        logger.exception(
+                            "plan progress sync failed on workflow pause %s",
+                            workflow_run_id,
+                        )
+                    logger.info(
+                        "Workflow %s paused for approval after %s",
+                        workflow_run_id,
+                        ",".join(s.step_key for s in confirm_steps),
+                    )
+                    break
+                wf_run.input = inp
+
             await self.db.commit()
 
         logger.info("Workflow %s finished with status %s", workflow_run_id, wf_run.status)
