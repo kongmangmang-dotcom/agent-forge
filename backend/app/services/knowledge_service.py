@@ -48,6 +48,8 @@ class KnowledgeService:
         self.db = db
 
     async def list_bases(self) -> list[KnowledgeBaseRead]:
+        from app.core.config import settings as _settings
+
         result = await self.db.execute(
             select(KnowledgeBaseModel).order_by(KnowledgeBaseModel.created_at.desc())
         )
@@ -55,6 +57,9 @@ class KnowledgeService:
         out: list[KnowledgeBaseRead] = []
         for row in rows:
             out.append(await self._base_to_read(row))
+        preferred = (_settings.daily_report_kb_name or "工作总结").strip()
+        if preferred:
+            out.sort(key=lambda b: (0 if b.name == preferred else 1, b.name))
         return out
 
     async def create_base(self, data: KnowledgeBaseCreate) -> KnowledgeBaseRead:
@@ -74,6 +79,43 @@ class KnowledgeService:
         await self.db.commit()
         await self.db.refresh(row)
         return await self._base_to_read(row)
+
+    async def get_or_create_base_by_name(
+        self,
+        name: str,
+        *,
+        description: str = "",
+    ) -> KnowledgeBaseRead:
+        """Return the first active base with this name, or create one."""
+        label = name.strip()
+        if not label:
+            raise ValidationError("知识库名称不能为空")
+        result = await self.db.execute(
+            select(KnowledgeBaseModel)
+            .where(KnowledgeBaseModel.name == label)
+            .order_by(KnowledgeBaseModel.created_at.asc())
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+        if row:
+            return await self._base_to_read(row)
+        return await self.create_base(
+            KnowledgeBaseCreate(name=label, description=description)
+        )
+
+    async def find_document_by_name(
+        self, knowledge_id: str, name: str
+    ) -> KnowledgeDocumentModel | None:
+        result = await self.db.execute(
+            select(KnowledgeDocumentModel)
+            .where(
+                KnowledgeDocumentModel.knowledge_id == knowledge_id,
+                KnowledgeDocumentModel.name == name.strip(),
+            )
+            .order_by(KnowledgeDocumentModel.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def get_base(self, knowledge_id: str) -> KnowledgeBaseRead:
         row = await self._get_base_row(knowledge_id)

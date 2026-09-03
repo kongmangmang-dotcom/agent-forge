@@ -224,3 +224,15 @@ class TaskAgentChatResponse(BaseModel):
 
 class PlanTodayResponse(BaseModel):
     task: DailyTaskRead
+
+
+class DailyReportResponse(BaseModel):
+    plan_date: str
+    knowledge_id: str
+    knowledge_name: str
+    document_id: str | None = None
+    document_name: str | None = None
+    skipped: bool = False
+    reason: str | None = None
+    task_count: int = 0
+    chat_backend: str = ""

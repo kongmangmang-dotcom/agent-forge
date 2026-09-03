@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     chat_api_key: str = ""
     chat_model: str = "gpt-4o-mini"
 
+    # Daily work report (22:00 Asia/Shanghai by default)
+    app_tz: str = "Asia/Shanghai"
+    daily_report_enabled: bool = True
+    daily_report_hour: int = 22
+    daily_report_minute: int = 0
+    daily_report_kb_name: str = "工作总结"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

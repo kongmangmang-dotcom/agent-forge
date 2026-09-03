@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import asyncio
+import logging
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, Request
@@ -10,11 +12,32 @@ from app.api.v1 import agents, events, knowledge, providers, roles, runs, schedu
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.session import SessionLocal, engine
+from app.services.daily_report_scheduler import (
+    ensure_default_work_summary_kb,
+    run_daily_report_loop,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    report_task: asyncio.Task | None = None
+    try:
+        await ensure_default_work_summary_kb()
+        logger.info("default work-summary knowledge base ready")
+    except Exception:
+        logger.exception("failed to ensure default 工作总结 knowledge base")
+    if settings.daily_report_enabled:
+        report_task = asyncio.create_task(run_daily_report_loop())
+        app.state.daily_report_task = report_task
     yield
+    if report_task is not None:
+        report_task.cancel()
+        try:
+            await report_task
+        except asyncio.CancelledError:
+            pass
     await engine.dispose()
 
 

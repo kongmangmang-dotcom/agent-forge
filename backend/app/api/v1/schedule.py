@@ -15,6 +15,7 @@ from app.schemas.schedule import (
     DailyTaskRead,
     DailyTaskSummary,
     DailyTaskUpdate,
+    DailyReportResponse,
     DayOverview,
     DayOverviewRange,
     PlanTodayRequest,
@@ -33,6 +34,7 @@ from app.schemas.schedule import (
     TaskNoteUpdate,
 )
 from app.schemas.workflow import WorkflowRunRead
+from app.services.daily_report_service import generate_daily_report
 from app.services.schedule_service import ScheduleService
 
 router = APIRouter(prefix="/schedule", tags=["schedule"])
@@ -44,6 +46,17 @@ async def day_overview(
     db: AsyncSession = Depends(get_session),
 ):
     return await ScheduleService(db).day_overview(plan_date=plan_date)
+
+
+@router.post("/daily-report", response_model=DailyReportResponse)
+async def create_daily_report(
+    plan_date: date | None = Query(None),
+    force: bool = Query(False, description="覆盖已有同名日报"),
+    db: AsyncSession = Depends(get_session),
+):
+    """Summarize the day's tasks into the default 工作总结 knowledge base."""
+    result = await generate_daily_report(db, plan_date=plan_date, force=force)
+    return DailyReportResponse(**result)
 
 
 @router.get("/overview-range", response_model=DayOverviewRange)
