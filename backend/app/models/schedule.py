@@ -18,6 +18,7 @@ class DailyTaskModel(Base):
     priority: Mapped[str] = mapped_column(String, nullable=False, default="medium")
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
     requirement: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    tags: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     workflow_definition_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("workflow_definition.id"), nullable=True
     )

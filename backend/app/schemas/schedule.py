@@ -96,6 +96,7 @@ class DailyTaskCreate(BaseModel):
     priority: str = "medium"
     summary: str = ""
     requirement: str = ""
+    tags: list[str] = Field(default_factory=list)
     plan_date: date | None = None
     workflow_definition_id: str | None = None
     with_plan: bool = False
@@ -108,6 +109,7 @@ class DailyTaskUpdate(BaseModel):
     priority: str | None = None
     summary: str | None = None
     requirement: str | None = None
+    tags: list[str] | None = None
     workflow_definition_id: str | None = None
     bound_workflow_ids: list[str] | None = None
 
@@ -125,6 +127,7 @@ class DailyTaskRead(ORMModel):
     priority: str
     summary: str
     requirement: str = ""
+    tags: list[str] = Field(default_factory=list)
     workflow_definition_id: str | None = None
     bound_workflow_ids: list[str] = Field(default_factory=list)
     workflow_name: str | None = None
@@ -156,6 +159,7 @@ class DailyTaskSummary(ORMModel):
     priority: str
     summary: str
     requirement: str = ""
+    tags: list[str] = Field(default_factory=list)
     workflow_definition_id: str | None = None
     bound_workflow_ids: list[str] = Field(default_factory=list)
     workflow_name: str | None = None

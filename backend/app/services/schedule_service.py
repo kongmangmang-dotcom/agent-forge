@@ -48,6 +48,25 @@ _NOTE_BODY_MAX = 16_000
 _NOTE_SECTION_MAX = 40_000
 _MEMORY_ITEM_MAX = 800
 _MEMORY_SECTION_MAX = 4_000
+_PRIORITY_VALUES = frozenset({"high", "medium", "low"})
+
+
+def _normalize_task_tags(raw: list | None) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw or []:
+        tag = str(item).strip()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag)
+    return out
+
+
+def _priority_or_default(value: str | None) -> str:
+    if value in _PRIORITY_VALUES:
+        return value  # type: ignore[return-value]
+    return "medium"
 _SAFE_NAME = re.compile(r"[^a-zA-Z0-9\-]+")
 
 
@@ -192,6 +211,7 @@ class ScheduleService:
             priority=row.priority,
             summary=row.summary,
             requirement=row.requirement or "",
+            tags=_normalize_task_tags(row.tags if isinstance(row.tags, list) else None),
             workflow_definition_id=row.workflow_definition_id,
             bound_workflow_ids=bound,
             workflow_name=wf_name,
@@ -342,6 +362,7 @@ class ScheduleService:
                     priority=row.priority,
                     summary=row.summary,
                     requirement=row.requirement or "",
+                    tags=_normalize_task_tags(row.tags if isinstance(row.tags, list) else None),
                     workflow_definition_id=row.workflow_definition_id,
                     bound_workflow_ids=bound,
                     workflow_name=wf_name,
@@ -637,9 +658,10 @@ class ScheduleService:
             title=title,
             type=task_type,
             status="todo",
-            priority=data.priority if data.priority in ("high", "medium", "low") else "medium",
+            priority=_priority_or_default(data.priority),
             summary=data.summary.strip(),
             requirement=requirement,
+            tags=_normalize_task_tags(data.tags),
             workflow_definition_id=wf_id,
             bound_workflow_ids=[wf_id] if wf_id else [],
         )
@@ -714,9 +736,10 @@ class ScheduleService:
             title=src.title,
             type=src.type if src.type in ("normal", "dev") else "normal",
             status=new_status,
-            priority=src.priority if src.priority in ("high", "medium", "low") else "medium",
+            priority=_priority_or_default(src.priority),
             summary=summary,
             requirement=src.requirement or "",
+            tags=_normalize_task_tags(src.tags if isinstance(src.tags, list) else None),
             workflow_definition_id=src.workflow_definition_id,
             bound_workflow_ids=list(bound),
             plan_author=src.plan_author,
@@ -787,6 +810,11 @@ class ScheduleService:
             raise ValidationError("status must be todo|in_progress|done")
         if "type" in updates and updates["type"] not in ("normal", "dev"):
             raise ValidationError("type must be normal|dev")
+        if "priority" in updates:
+            if updates["priority"] not in _PRIORITY_VALUES:
+                raise ValidationError("priority must be high|medium|low")
+        if "tags" in updates and updates["tags"] is not None:
+            updates["tags"] = _normalize_task_tags(updates["tags"])
         if "workflow_definition_id" in updates and updates["workflow_definition_id"]:
             await self._ensure_workflow(updates["workflow_definition_id"])
         if "bound_workflow_ids" in updates and updates["bound_workflow_ids"] is not None:

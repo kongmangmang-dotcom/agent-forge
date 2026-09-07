@@ -24,6 +24,7 @@ class AgentRole(StrEnum):
     TESTER = "tester"
     REVIEWER = "reviewer"
     INTEGRATOR = "integrator"
+    GAME_DESIGNER = "game_designer"
 
 
 class RunStatus(StrEnum):
